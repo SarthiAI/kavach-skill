@@ -24,7 +24,7 @@ assert not kp.is_expired
 bundle = kp.public_keys()
 ```
 
-A `KavachKeyPair` holds the ML-DSA-65 secret key plus an Ed25519 secret key (used in hybrid mode). The secret material never crosses the FFI boundary in plaintext; treat the Python `KavachKeyPair` instance as the secret-bearing object and persist it via your own KMS or sealed storage.
+A `KavachKeyPair` holds the ML-DSA-65 secret key plus an Ed25519 secret key (used in hybrid mode). The secret material lives in process memory and never crosses the FFI boundary as Python-readable bytes, the Python instance has no serialization method. For stable signer identity across process restarts, see "Persisting keys across process restarts" below; the practical pattern is to provision raw key bytes from your KMS / HSM at boot and skip `KavachKeyPair` entirely.
 
 `bundle` is a `PublicKeyBundle` with verifying keys for both algorithms. It is safe to publish.
 
@@ -56,27 +56,72 @@ reconstructed = PermitToken(
     expires_at=pt.expires_at,
     action_name=pt.action_name,
 )
-assert signer.verify(reconstructed, pt.signature)
+signer.verify(reconstructed, pt.signature)   # raises ValueError on any failure; returns None on success
 ```
+
+`PqTokenSigner.verify(token, signature)` returns `None` and raises `ValueError` on any failure (tampering, wrong key, malformed envelope, algorithm mismatch). It does **not** return a boolean, do not write `assert signer.verify(...)`.
 
 Sign-failure is fail-closed. If `PqTokenSigner.sign` errors during evaluation, the verdict becomes a Refuse, never a permit-without-signature.
 
-### PQ-only vs hybrid
+### Constructors
+
+`PqTokenSigner` exposes six class methods. Pick the one that matches how your key material is sourced:
+
+| Constructor                                                                   | When to use                                                                       |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `PqTokenSigner.generate_pq_only(key_id=None)`                                 | Quick start / tests; fresh random ML-DSA-65 keypair, no persistence.              |
+| `PqTokenSigner.generate_hybrid(key_id=None)`                                  | Quick start / tests; fresh random ML-DSA-65 + Ed25519 keypair, no persistence.    |
+| `PqTokenSigner.from_keypair_pq_only(keypair, key_id=None)`                    | Production: persist a `KavachKeyPair` via your KMS; build a PQ-only signer from it. |
+| `PqTokenSigner.from_keypair_hybrid(keypair, key_id=None)`                     | Production: persist a `KavachKeyPair`; build a hybrid signer from it.             |
+| `PqTokenSigner.pq_only(ml_dsa_signing_key, ml_dsa_verifying_key, key_id)`     | Low-level: you already hold raw key bytes (e.g. fetched from a remote KMS).       |
+| `PqTokenSigner.hybrid(ml_dsa_signing_key, ml_dsa_verifying_key, ed25519_signing_key, ed25519_verifying_key, key_id)` | Low-level hybrid version.            |
+
+The two `generate_*` constructors are convenient but throw the keypair away after construction; use them only when you do not need to verify signatures from anywhere else. The same in-memory signer verifies its own output during the process lifetime, but a restart loses the key.
+
+`key_id` is the identifier stamped into every signed envelope; verifiers use it to look up the matching public bundle in a `PublicKeyDirectory`. When omitted, all `from_keypair_*` and `generate_*` constructors default to the keypair's own `id`.
+
+### Persisting keys across process restarts
+
+The Python `KavachKeyPair` class exposes no serialization of its secret material, you cannot generate a keypair, dump it to disk, and rehydrate it later through the SDK. There are two practical patterns for stable signer identity across restarts:
+
+**Pattern A: provision raw key bytes from your KMS / HSM.** Pull the ML-DSA-65 (and Ed25519, for hybrid) signing and verifying key bytes out of your secret store at boot, and use the low-level constructors:
 
 ```python
-PqTokenSigner.generate_pq_only()    # ML-DSA-65 only
-PqTokenSigner.generate_hybrid()     # ML-DSA-65 + Ed25519
+ml_dsa_sk = my_kms.get("kavach/ml_dsa_signing_key")     # 32-byte ML-DSA-65 seed
+ml_dsa_vk = my_kms.get("kavach/ml_dsa_verifying_key")   # encoded ML-DSA-65 verifying key
+ed_sk     = my_kms.get("kavach/ed25519_signing_key")
+ed_vk     = my_kms.get("kavach/ed25519_verifying_key")
+
+signer = PqTokenSigner.hybrid(ml_dsa_sk, ml_dsa_vk, ed_sk, ed_vk, key_id="kavach-prod-2026")
+gate   = Gate.from_dict(policy, token_signer=signer)
 ```
 
-Algorithm mismatch is strict in both directions. A hybrid verifier rejects a PQ-only envelope (downgrade guard); a PQ-only verifier rejects a hybrid envelope. Pick one mode at deploy time and stick with it; do not mix verifiers.
+This bypasses `KavachKeyPair` entirely. The `key_id` becomes the stable identity that verifiers resolve through their `PublicKeyDirectory`; rotate by issuing a new `key_id`, distributing the new bundle, and switching over.
 
-`PqTokenSigner` exposes `is_hybrid` as a getter so a verifying service can introspect what it received and refuse mismatches:
+**Pattern B: regenerate on every restart and re-distribute the public bundle.** Acceptable when you control every verifier and can push them a fresh `PublicKeyBundle` on each gate-process boot:
+
+```python
+kp     = KavachKeyPair.generate()
+signer = PqTokenSigner.from_keypair_hybrid(kp)
+gate   = Gate.from_dict(policy, token_signer=signer)
+distribute_to_verifiers(kp.public_keys())   # your code, e.g. push to a PublicKeyDirectory
+```
+
+This is simpler but less stable and not suitable when the verifier pool is heterogeneous or eventually consistent.
+
+Picking between them: Pattern A is the production default; Pattern B is fine for single-tenant deployments where the gate process is the only signer and the verifier pool is in-process or co-located.
+
+### PQ-only vs hybrid
+
+`PqTokenSigner.is_hybrid` (property, not callable) reports whether a signer signs envelopes with both ML-DSA-65 and Ed25519 (`True`) or ML-DSA-65 only (`False`):
 
 ```python
 if signer.is_hybrid:
     # signer expects hybrid envelopes
     ...
 ```
+
+Algorithm mismatch is strict in both directions. A hybrid verifier rejects a PQ-only envelope (downgrade guard); a PQ-only verifier rejects a hybrid envelope. Pick one mode at deploy time and stick with it; do not mix verifiers.
 
 ### Verifying via a public key directory
 
@@ -95,18 +140,37 @@ Path("directory.json").write_bytes(manifest)
 # On the verifier side:
 directory = PublicKeyDirectory.from_signed_file(
     "directory.json",
-    root_ml_dsa_verifying_key=signing_key.public_keys().ml_dsa_verifying_key,
+    signing_key.public_keys().ml_dsa_verifying_key,
 )
 verifier = DirectoryTokenVerifier(directory, hybrid=True)
 
-verifier.verify(token, signed_envelope)  # raises on tamper, miss, or downgrade
+verifier.verify(token, signature)            # raises ValueError on tamper / miss / downgrade / expiry
 ```
 
-`PublicKeyDirectory` has three factories: `in_memory([...])`, `from_file(path)`, and `from_signed_file(path, root_ml_dsa_verifying_key=...)`. The signed-file variant is the one to use in production, the manifest is signed by a single root key and any tamper raises on load.
+`PublicKeyDirectory` has three factories plus several utility surfaces:
 
-`insert` and `remove` work only on the in-memory variant; calling them on a file-backed directory raises. `reload` on the in-memory variant is a no-op (not an error), so callers can be polymorphic.
+| Surface                                                                    | Purpose                                                                                       |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `PublicKeyDirectory.in_memory(bundles=[])`                                 | Mutable, in-process directory. Use for tests and dynamic populations.                         |
+| `PublicKeyDirectory.from_file(path)`                                       | Load an unsigned bundle array from disk. No tamper protection.                                |
+| `PublicKeyDirectory.from_signed_file(path, root_ml_dsa_verifying_key)`     | Load a root-signed manifest. The manifest's ML-DSA-65 signature must verify against the supplied root key; anything else raises. **Use this in production.** |
+| `PublicKeyDirectory.build_unsigned_manifest(bundles)`                      | Static helper. Returns JSON bytes for `from_file` consumption.                                |
+| `PublicKeyDirectory.build_signed_manifest(bundles, ml_dsa_signing_key)`    | Static helper. Returns JSON bytes for `from_signed_file` consumption. Pass the raw ML-DSA-65 seed bytes; for the keypair-friendly form use `KavachKeyPair.build_signed_manifest(bundles)` (recommended). |
+| `directory.fetch(key_id)`                                                  | Look up a single bundle by key id. Raises on miss, backend unavailable, or corrupt manifest.  |
+| `directory.insert(bundle)` / `directory.remove(key_id)`                    | Mutate an in-memory directory. Raises on file-backed directories.                             |
+| `directory.reload()`                                                       | Re-read the underlying file (file-backed only). Parse / signature errors raise; the previous good cache is preserved. No-op on in-memory directories so callers can be polymorphic. |
+| `len(directory)` / `directory.length` / `directory.is_empty`               | Count diagnostics.                                                                            |
 
-Every error path is fail-closed. NotFound, BackendUnavailable, RootSignatureInvalid, Corrupt, EnvelopeParse, AlgorithmMismatch, and SignatureInvalid all reject the token cleanly.
+`DirectoryTokenVerifier(directory, hybrid=True)` wraps a directory and verifies token signatures by resolving the envelope's `key_id` to a bundle. Its `verify` method has one keyword-only kwarg worth knowing about:
+
+```python
+verifier.verify(token, signature, enforce_expiry=True)   # default: rejects an expired bundle
+verifier.verify(token, signature, enforce_expiry=False)  # forensic: accept an expired bundle for archive review
+```
+
+Default `enforce_expiry=True` is the correct posture for an authorization gate, a rotated-out keypair must not authorise new actions even if its signature is still cryptographically valid. Pass `enforce_expiry=False` only when re-checking an archived audit trail against a bundle that has since expired; do not weaken it on the live verification path.
+
+Every error path is fail-closed. NotFound, BackendUnavailable, RootSignatureInvalid, Corrupt, EnvelopeParse, AlgorithmMismatch, SignatureInvalid, and (when `enforce_expiry=True`) ExpiredBundle all raise `ValueError` and reject the token cleanly.
 
 ## Signed audit chain
 
@@ -116,27 +180,41 @@ Every error path is fail-closed. NotFound, BackendUnavailable, RootSignatureInva
 from kavach import KavachKeyPair, AuditEntry, SignedAuditChain
 
 kp = KavachKeyPair.generate()
-chain = SignedAuditChain(kp, hybrid=True)
+chain = SignedAuditChain(kp, hybrid=True)             # hybrid=True is the default
 
-chain.append(AuditEntry(
+new_length = chain.append(AuditEntry(
     principal_id="agent-bot",
     action_name="issue_refund",
-    verdict="permit",
+    verdict="permit",                                  # one of "permit", "refuse", "invalidate"
     verdict_detail="within policy",
 ))
+# new_length is the chain length after the append (returns u64).
 
-chain.verify(kp.public_keys())  # raises if anything is tampered
+chain.verify(kp.public_keys())                         # raises ValueError if anything is tampered
 ```
 
 Each entry hashes the previous entry, so any single-entry tamper invalidates every entry after it. `verify` walks the chain and validates each signature plus each prev-hash link.
+
+`AuditEntry` accepts these constructor kwargs (all positional-or-keyword): `principal_id`, `action_name`, `verdict`, `verdict_detail` (required), plus `resource`, `decided_by`, `ip`, `evaluation_id`, `session_id` (optional). `verdict` must be exactly `"permit"`, `"refuse"`, or `"invalidate"`; anything else raises. `evaluation_id` and `session_id` must parse as UUIDs when supplied; if you omit them, the SDK fills in fresh random UUIDs.
+
+### Inspecting the chain
+
+| Surface              | Returns                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `len(chain)`         | Current chain length (`int`).                                  |
+| `chain.length`       | Same value; convenient for chained property access.            |
+| `chain.is_empty`     | `True` if the chain has zero entries.                          |
+| `chain.head_hash`    | Hex SHA-256 of the most recently appended entry. Use for tamper-detection of in-process chains. |
+| `chain.is_hybrid`    | `True` when the chain was constructed with `hybrid=True`.      |
 
 ### JSONL export and import
 
 For off-node storage, export to JSONL and verify later:
 
 ```python
-blob = chain.export_jsonl()
-SignedAuditChain.verify_jsonl(blob, kp.public_keys())
+blob = chain.export_jsonl()                    # bytes; one SignedAuditEntry per line, trailing newline.
+verified_count = SignedAuditChain.verify_jsonl(blob, kp.public_keys())
+# verified_count is the number of verified entries (int).
 ```
 
 `verify_jsonl` infers the chain mode (PQ-only or hybrid) from the blob by default. To assert a specific mode:
@@ -145,7 +223,7 @@ SignedAuditChain.verify_jsonl(blob, kp.public_keys())
 SignedAuditChain.verify_jsonl(blob, kp.public_keys(), hybrid=True)
 ```
 
-A mismatch between the asserted mode and the actual blob mode raises before any cryptography runs.
+A mismatch between the asserted mode and the actual blob mode raises `ValueError` **before** any cryptography runs, preventing the silent-downgrade attack of verifying a hybrid chain under a PQ-only verifier (or vice versa). Pass `hybrid=None` (the default) to trust the blob; pass an explicit value when you want a strict assertion.
 
 ### Mode-downgrade rejection
 
@@ -160,6 +238,6 @@ This is intentionally strict. Do not loosen it; the protection is what makes the
 | Proof that a downstream service should accept this action  | `PqTokenSigner` on the gate, verifier on the receiving service |
 | Tamper-evident log of every action                         | `SignedAuditChain` with `verify` after each append, JSONL export for storage |
 | One verifier that trusts many signers                      | `PublicKeyDirectory` (signed manifest) + `DirectoryTokenVerifier` |
-| Encrypted bytes between two known peers                    | `SecureChannel` (see the [Python SDK README](https://github.com/SarthiAI/Kavach/blob/main/kavach-py/README.md) for details) |
+| Encrypted, signed, replay-protected bytes between two peers | `SecureChannel`, see [secure-channel.md](secure-channel.md)  |
 
 The audit chain is independent of the signed-token surface. Most services want both: signed tokens to authorize each individual action, and a signed audit chain that records every gate call (Permit, Refuse, Invalidate) for incident review and compliance.

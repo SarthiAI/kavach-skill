@@ -54,8 +54,12 @@ def build_gate() -> Gate:
         str(POLICY_PATH),
         invariants=INVARIANTS,
         token_signer=TOKEN_SIGNER,
-        # Flip to True to log verdicts without blocking traffic. Read
-        # verdict.would_have_been to see what the real gate would have done.
+        # Flip to True to run the gate without blocking traffic. In observe
+        # mode every verdict is a Permit; underlying refuse/invalidate
+        # decisions are emitted by the Rust core as tracing INFO logs with
+        # the message "observe-only: would have blocked this action". For
+        # programmatic visibility, also wire a SignedAuditChain around
+        # gate.evaluate(...).
         observe_only=False,
     )
 

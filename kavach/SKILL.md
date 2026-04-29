@@ -1,6 +1,6 @@
 ---
 name: kavach
-description: Add a default-deny execution gate around AI-agent actions in Python using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, or wants to wrap LangChain, LangGraph, MCP, or any tool-calling code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
+description: Add a default-deny execution gate around AI-agent actions in Python using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, or wants to wrap LangChain, LangGraph, or any agent tool-call code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
 license: Apache-2.0
 compatibility: Python 3.10 or newer with kavach-sdk installed from PyPI. The Node SDK exists in the upstream repo but is not yet published to npm; treat Node integration as out of scope for this skill.
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # Kavach: default-deny execution gates for AI agents
 
-Kavach is a Rust-core, Python-bound library that puts a deny-by-default gate in front of every action your agent or service tries to execute. The gate runs four evaluators in order (identity, policy, drift, invariants) and produces one of three verdicts:
+Kavach is a Rust-core, Python-bound library that puts a deny-by-default gate in front of every action your agent or service tries to execute. The gate runs three evaluators in order: **policy** (which also handles identity checks via the `identity_kind`, `identity_role`, and `identity_id` conditions), **drift** (optional, on by default), and **invariants** (optional, present when you pass `invariants=...` to the gate constructor). Each call produces one of three verdicts:
 
 - **Permit** with a signed `PermitToken` you can hand to downstream services as proof the action passed the gate.
 - **Refuse** with an evaluator name and a reason code, so the calling code knows *why* it was blocked.
@@ -24,7 +24,7 @@ Every error path fails closed. Missing parameters, unparseable durations, store 
 Activate this skill when the user is doing any of the following:
 
 - Adding `kavach-sdk` to a Python project.
-- Wrapping a LangChain tool, LangGraph node, or MCP tool call behind a `Gate.evaluate(...)` check.
+- Wrapping a LangChain tool, LangGraph node, or any agent tool-call handler behind a `Gate.evaluate(...)` or `Gate.check(...)` call.
 - Authoring a Kavach policy (in Python dict, JSON, or TOML form).
 - Wiring drift detectors (device fingerprint, geo location, session age, action count).
 - Issuing or verifying signed `PermitToken`s with `PqTokenSigner`.
@@ -107,21 +107,22 @@ For the full grammar of conditions, priorities, durations, and time-window synta
 
 ## ActionContext fields you actually need
 
-| Field             | Required for                                   | Notes                                                         |
-| ----------------- | ---------------------------------------------- | ------------------------------------------------------------- |
-| `principal_id`    | always                                         | Stable string. Used as the rate-limit bucket prefix.          |
-| `principal_kind`  | always                                         | One of `"user"`, `"agent"`, `"service"`, `"scheduler"`, `"external"`. |
-| `action_name`     | always                                         | Used by the `action` condition. Wildcards via trailing `*`.   |
-| `params`          | numeric guards (`param_max`, `param_min`, `param_in`), invariants | Plain dict. Numbers stay numeric; strings stay strings.       |
-| `roles`           | `identity_role` conditions                     | List of strings. Order does not matter.                       |
-| `resource`        | `resource` conditions                          | Optional. Missing resource fails the condition (closed).      |
-| `session_id`      | `session_age_max`, `action_count` drift        | Stable string per session.                                    |
-| `session_started_at` | `session_age_max` drift                     | UTC datetime. Required when using session-age drift.          |
-| `action_count`    | `action_count` drift detector                  | Integer. Caller increments per action.                        |
-| `ip`, `current_geo`, `origin_geo` | geo drift detector              | See [references/drift-detectors.md](references/drift-detectors.md). |
-| `device`, `origin_device` | device drift detector                  | `DeviceFingerprint` instance. See drift-detectors doc.        |
+| Field                | Required for                                   | Notes                                                         |
+| -------------------- | ---------------------------------------------- | ------------------------------------------------------------- |
+| `principal_id`       | always                                         | Stable string. Used as the rate-limit bucket prefix.          |
+| `principal_kind`     | always                                         | One of `"user"`, `"agent"`, `"service"`, `"scheduler"`, `"external"`. |
+| `action_name`        | always                                         | Used by the `action` condition. Wildcards via trailing `*`.   |
+| `params`             | numeric guards (`param_max`, `param_min`), invariants | `dict[str, float]`. Constructor accepts only numeric values; for string params (`param_in`, e.g. `currency`), call `ctx.with_param("currency", "INR")` after construction. |
+| `roles`              | `identity_role` conditions                     | List of strings. Order does not matter.                       |
+| `resource`           | `resource` conditions                          | Optional. Missing resource fails the condition (closed).      |
+| `session_id`         | `session_age_max`, behavior drift, audit       | UUID string. A non-UUID value is silently replaced with a fresh random UUID, always pass `str(uuid.uuid4())`. |
+| `session_started_at` | `session_age_max`, behavior drift              | Unix epoch seconds (`int`). Required when using session-age drift. |
+| `action_count`       | behavior drift                                 | Unsigned integer. Caller increments per action.               |
+| `ip`, `origin_ip`    | geo drift                                      | IP strings; `origin_ip` overrides the `ip`-derived session origin. |
+| `current_geo`, `origin_geo` | geo drift                               | `GeoLocation`. See [references/drift-detectors.md](references/drift-detectors.md). |
+| `device`, `origin_device` | device drift                              | `DeviceFingerprint(hash, description=None)`. See drift-detectors doc. |
 
-Anything you do not pass is simply not evaluated. Drift conditions that need a missing field fail closed, never silently bypass.
+Anything you do not pass is simply not evaluated. Drift conditions that need a missing field fail closed, never silently bypass. There is no `evaluated_at` constructor field; the gate uses the system clock for `time_window` evaluation.
 
 ## The `@guarded` decorator
 
@@ -158,21 +159,23 @@ To stage Kavach without blocking traffic, construct the gate with `observe_only=
 gate = Gate.from_dict(policy, observe_only=True)
 ```
 
-The verdict shape is identical, but `verdict.is_permit` is `True` for everything. Read `verdict.would_have_been` (Permit / Refuse / Invalidate) to log what the real gate would have done. Flip `observe_only=False` when the logs look right.
+In observe mode, every `gate.evaluate(ctx)` returns a Permit and `gate.check(ctx)` never raises. The full evaluator chain (policy, drift, invariants) still runs; underlying refuse / invalidate decisions are emitted by the Rust core as `tracing` events at `INFO` level with the message `"observe-only: would have blocked this action"`. There is no `verdict.would_have_been` attribute on the Python `Verdict`.
+
+To get programmatic visibility, wire a `SignedAuditChain` (or your own logger) around `gate.evaluate` and record every call: when you flip `observe_only=False` later, the same chain becomes the production audit trail. See [references/python-sdk.md](references/python-sdk.md#observe-mode) for the full rollout pattern.
 
 ## Deeper reference
 
-- [references/python-sdk.md](references/python-sdk.md): full Python surface, including the `@guarded` decorator, hot reload, and observe-only mode.
+- [references/python-sdk.md](references/python-sdk.md): full Python surface (Gate kwargs, `Gate.check`, `@guarded` decorator, `Refused`/`Invalidated` exceptions, hot reload, observe-only mode).
 - [references/policy-language.md](references/policy-language.md): condition vocabulary, duration syntax, time-window grammar, kitchen-sink example.
 - [references/drift-detectors.md](references/drift-detectors.md): device, geo, session-age, action-count detectors and their `ActionContext` fields.
-- [references/audit-and-pq.md](references/audit-and-pq.md): `KavachKeyPair`, `PqTokenSigner` (PQ-only and hybrid), `SignedAuditChain`, JSONL export and verification.
+- [references/audit-and-pq.md](references/audit-and-pq.md): `KavachKeyPair`, `PqTokenSigner` (PQ-only and hybrid), `SignedAuditChain`, `PublicKeyDirectory`, JSONL export and verification.
+- [references/secure-channel.md](references/secure-channel.md): `SecureChannel`, encrypted + signed + replay-protected byte channels between two peers.
 - [scripts/scaffold_python.py](scripts/scaffold_python.py): runnable scaffold that writes a starter `kavach_setup.py` plus an example policy file.
 - [assets/policies.example.toml](assets/policies.example.toml): the kitchen-sink TOML policy exercising every condition variant.
 
 ## What to avoid
 
-- Do not present `kavach-http`, `kavach-mcp`, or `kavach-redis` (multi-replica deployments) as ready-to-ship. They exist in the upstream library but the consumer-validation harness does not yet exercise them end-to-end. Point users at the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md) for those surfaces.
-- Do not suggest the Node SDK for installation. The code lives in the upstream repo but is not yet published to npm.
+- Do not suggest the Node SDK, MCP middleware, HTTP middleware, or any multi-replica Redis deployment. None of these are publicly released. The published surface is `kavach-sdk` on PyPI, and that is the only surface this skill covers. If a user asks for those, point them at the upstream repo and the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md) and stop there.
 - Do not change `Gate` to fail open under any circumstance, even temporarily for debugging. The library's contract is fail-closed; integrators rely on it.
 - Do not skip invariants when refactoring policies. Invariants are the regulator-grade hard floor that beats any permissive policy. Removing them in favor of a `param_max` policy condition silently weakens the system.
 

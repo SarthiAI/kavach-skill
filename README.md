@@ -1,6 +1,6 @@
 # Kavach Skill
 
-An [Agent Skill](https://agentskills.io/) that teaches AI coding agents (Claude Code, Cursor, Codex, Gemini CLI, and any other client that reads `SKILL.md`) how to add [Kavach](https://github.com/SarthiAI/Kavach) execution gates to a Python application.
+The official skills library for [Kavach](https://github.com/SarthiAI/Kavach) execution gates to a Python application.
 
 ## What it does
 
@@ -17,16 +17,15 @@ That places `kavach/` into your project's skills directory. Compatible clients p
 ## What's covered
 
 - Installing `kavach-sdk` and constructing a `Gate`.
-- Authoring policies as a Python dict, JSON string, JSON file, or TOML file (one schema, four loaders).
+- Authoring policies as a Python dict, JSON string, JSON file, TOML string, or TOML file (one schema, five loaders).
 - Wiring the four built-in drift detectors (device, geo, session age, action count).
 - Issuing signed post-quantum permit tokens with `PqTokenSigner` and verifying them downstream.
 - Maintaining a tamper-evident `SignedAuditChain` and exporting it as JSONL.
 - Hot-reloading policies and rolling out gradually with observe-only mode.
 
-## What's intentionally out of scope
+## Scope
 
-- Node SDK. The code exists in the upstream repo but is not yet on npm; this skill stays on the validated Python surface.
-- Distributed multi-replica deployments via `kavach-redis`, HTTP middleware, and MCP tool gating. These are experimental in the upstream library and should not be presented as ready-to-ship. See the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md).
+This skill covers the published `kavach-sdk` package on PyPI: the Python `Gate` (with all five loaders), `ActionContext`, `Verdict`, `PermitToken`, the four built-in drift detectors, signed permit tokens, the audit chain, the public-key directory, `SecureChannel`, and the `@guarded` decorator. Anything outside that surface is not in scope and the skill should not suggest it. For surfaces that are not yet released (Node SDK, HTTP / MCP middleware, multi-replica Redis deployments), see the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md).
 
 ## License
 
