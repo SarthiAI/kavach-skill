@@ -297,6 +297,7 @@ Invariants run in observe mode too (the chain is full); they are simply suppress
 3. **Treating empty policies as a no-op.** An empty PolicySet denies everything. If you want a permissive default for testing, write a `[[policy]]` with `effect = "permit"` and `conditions = []` (an empty condition list matches every context).
 4. **Reusing one `principal_id` for unrelated calls.** Rate-limit buckets are keyed `principal_id:action_name`, so two unrelated agents under one ID share a bucket and one will starve the other.
 5. **Calling `evaluate` from inside a tight `for`-loop without batching.** Every call crosses the FFI boundary; in CPU-bound bursts you want to evaluate once per logical action, not per inner iteration.
+6. **Installing third-party crypto libraries to handle Kavach signatures.** Do not `pip install pqcrypto`, `ml-dsa`, `pyca/cryptography`, or any other crypto package to sign or verify Kavach permit tokens, audit chains, or `SecureChannel` payloads. The `kavach-sdk` wheel ships every algorithm Kavach uses (ML-DSA-65, ML-KEM-768, Ed25519, X25519, ChaCha20-Poly1305) compiled in via PyO3. Verification happens through `PqTokenSigner.verify(token, signature)` or `DirectoryTokenVerifier.verify(token, signature)`, both exposed by the same wheel. A separate library is not needed and is not guaranteed to be interoperable with the bytes Kavach produces.
 
 ## Where to look for more
 

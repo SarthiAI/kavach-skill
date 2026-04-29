@@ -82,9 +82,22 @@ The two `generate_*` constructors are convenient but throw the keypair away afte
 
 ### Persisting keys across process restarts
 
-The Python `KavachKeyPair` class exposes no serialization of its secret material, you cannot generate a keypair, dump it to disk, and rehydrate it later through the SDK. There are two practical patterns for stable signer identity across restarts:
+> **Known limitation in v0.1.0 of `kavach-sdk`.** The Python `KavachKeyPair` class exposes no serialization of its secret material, there is no `kp.export_secret_bytes()` and no `KavachKeyPair.from_bytes(...)`. So a keypair you generate via `KavachKeyPair.generate()` cannot be persisted through the published Python surface alone. Stable signer identity across process restarts requires one of the two patterns below, with the limitations noted on each. Tracked on the upstream Kavach roadmap.
 
-**Pattern A: provision raw key bytes from your KMS / HSM.** Pull the ML-DSA-65 (and Ed25519, for hybrid) signing and verifying key bytes out of your secret store at boot, and use the low-level constructors:
+**Pattern B (recommended for v0.1.0): regenerate on every restart and re-distribute the public bundle.** The only path that is fully reachable through the published Python SDK on its own. Generate a fresh keypair at boot, build the signer, and push the resulting `PublicKeyBundle` to your verifier pool through whatever distribution mechanism you already operate (a config service, a Kubernetes ConfigMap, a `PublicKeyDirectory` file, etc.):
+
+```python
+kp     = KavachKeyPair.generate()
+signer = PqTokenSigner.from_keypair_hybrid(kp)
+gate   = Gate.from_dict(policy, token_signer=signer)
+distribute_to_verifiers(kp.public_keys())   # your code, e.g. publish to a PublicKeyDirectory
+```
+
+Operationally: every gate-process boot generates a new `key_id`. Verifiers must accept multiple bundles in their directory and resolve by the `key_id` stamped on each envelope. Old bundles can be removed once permits issued under them have expired.
+
+This pattern is acceptable for single-tenant deployments and for any deployment where verifiers can be updated within seconds of a gate-process restart. It is not suitable when verifiers are eventually consistent or operated by a third party who cannot re-fetch the bundle on demand.
+
+**Pattern A (available only with externally-minted keys): provision raw key bytes from your KMS / HSM.** The lowest-level `PqTokenSigner.hybrid(ml_dsa_sk, ml_dsa_vk, ed_sk, ed_vk, key_id=...)` constructor accepts raw bytes. If your environment can produce ML-DSA-65 and Ed25519 key material outside Kavach (a separate keygen tool, an HSM that exposes ML-DSA-65, etc.), you can route those bytes through your KMS and load them at boot:
 
 ```python
 ml_dsa_sk = my_kms.get("kavach/ml_dsa_signing_key")     # 32-byte ML-DSA-65 seed
@@ -96,20 +109,9 @@ signer = PqTokenSigner.hybrid(ml_dsa_sk, ml_dsa_vk, ed_sk, ed_vk, key_id="kavach
 gate   = Gate.from_dict(policy, token_signer=signer)
 ```
 
-This bypasses `KavachKeyPair` entirely. The `key_id` becomes the stable identity that verifiers resolve through their `PublicKeyDirectory`; rotate by issuing a new `key_id`, distributing the new bundle, and switching over.
+This pattern gives you stable identity across restarts, but it presumes you have a non-Kavach path that emits matching ML-DSA-65 / Ed25519 key bytes. Do **not** install third-party Python PQ-crypto libraries (`pqcrypto`, `ml-dsa`, `pyca/cryptography`, etc.) just to mint these bytes for use with Kavach, that path has not been validated to produce keys interoperable with `kavach-pq`'s ML-DSA-65 implementation. The only safe sources are an HSM with native ML-DSA-65 support or a generator that has been verified against `kavach-pq`'s test vectors.
 
-**Pattern B: regenerate on every restart and re-distribute the public bundle.** Acceptable when you control every verifier and can push them a fresh `PublicKeyBundle` on each gate-process boot:
-
-```python
-kp     = KavachKeyPair.generate()
-signer = PqTokenSigner.from_keypair_hybrid(kp)
-gate   = Gate.from_dict(policy, token_signer=signer)
-distribute_to_verifiers(kp.public_keys())   # your code, e.g. push to a PublicKeyDirectory
-```
-
-This is simpler but less stable and not suitable when the verifier pool is heterogeneous or eventually consistent.
-
-Picking between them: Pattern A is the production default; Pattern B is fine for single-tenant deployments where the gate process is the only signer and the verifier pool is in-process or co-located.
+**Picking between them:** for v0.1.0, default to Pattern B and live with the rotate-per-restart operational cost. Pattern A becomes attractive only when (a) you have an HSM-backed ML-DSA-65 generator and (b) the operational cost of bundle redistribution is high enough to justify the complexity. The upstream roadmap tracks adding `KavachKeyPair` serialization, which would make Pattern A reachable end-to-end through the SDK alone, watch for that on the roadmap.
 
 ### PQ-only vs hybrid
 
