@@ -1,10 +1,20 @@
 # Policy language reference
 
-The exhaustive grammar for the schema consumed by every Kavach loader. Same schema across `from_dict`, `from_json_string`, `from_json_file`, `from_toml`, and `from_file`. Pick the format that matches where the policy lives; the evaluation behavior is identical.
+The exhaustive grammar for the schema consumed by every Kavach loader. Same schema across all loaders in every language binding:
+
+| Format | Python loader | Node loader |
+| ------ | ------------- | ----------- |
+| TOML string | `Gate.from_toml(s)` | `Gate.fromToml(s)` |
+| TOML file | `Gate.from_file(path)` | `Gate.fromFile(path)` |
+| Dict / plain object | `Gate.from_dict(obj)` | `Gate.fromObject(obj)` |
+| JSON string | `Gate.from_json_string(s)` | `Gate.fromJsonString(s)` |
+| JSON file | `Gate.from_json_file(path)` | `Gate.fromJsonFile(path)` |
+
+The evaluation behaviour is identical regardless of language or loader. Pick the format that matches where the policy lives.
 
 ## File shape
 
-A policy file (or in-memory object) wraps a list of `[[policy]]` entries. The TOML form uses array-of-tables; dict and JSON use a top-level `policies` key. The singular `policy` is also accepted as an alias.
+A policy file (or in-memory object) wraps a list of `[[policy]]` entries. The TOML form uses array-of-tables; dict, object, and JSON use a top-level `policies` key. The singular `policy` is also accepted as an alias.
 
 ### TOML
 
@@ -39,6 +49,27 @@ conditions = [
 }
 ```
 
+### Node / TypeScript object
+
+```typescript
+{
+  policies: [
+    {
+      name: "agent_small_refunds",
+      effect: "permit",
+      priority: 10,
+      conditions: [
+        { identity_kind: "agent" },
+        { action: "issue_refund" },
+        { param_max: { field: "amount", max: 5000.0 } },
+      ],
+    },
+  ],
+}
+```
+
+Condition keys stay snake_case (`identity_kind`, `param_max`) even inside a TypeScript object because the schema is normalised across languages. The top-level `policies` array key matches.
+
 ### JSON
 
 ```json
@@ -58,14 +89,14 @@ conditions = [
 }
 ```
 
-An empty file (or `{"policies": []}`, or `Gate.from_toml("")`) is valid. It means default-deny everything, useful as a kill switch via `gate.reload("")`.
+An empty file (or `{"policies": []}`, or an empty TOML string passed to either language's TOML loader) is valid. It means default-deny everything, useful as a kill switch via `gate.reload("")` (Python) or `gate.reload("")` (Node, same method name in both languages).
 
 ## `[[policy]]` fields
 
 | Field         | Type             | Required | Default | Description                                                                  |
 | ------------- | ---------------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `name`        | string           | yes      | ,       | Human-readable identifier. Appears in refusal reasons and tracing.           |
-| `effect`      | enum             | yes      | ,       | One of `"permit"` or `"refuse"`. Any other value is a parse error.           |
+| `name`        | string           | yes      | (none)  | Human-readable identifier. Appears in refusal reasons and tracing.           |
+| `effect`      | enum             | yes      | (none)  | One of `"permit"` or `"refuse"`. Any other value is a parse error.           |
 | `conditions`  | array of tables  | yes      | `[]`    | AND-combined list of conditions. Empty list matches every context.           |
 | `description` | string           | no       | unset   | Free-form documentation. Not used during evaluation.                         |
 | `priority`    | unsigned integer | no       | `100`   | Lower number is evaluated first. Ties fall back to declaration order.        |
@@ -269,17 +300,21 @@ All conditions inside a policy are ANDed. To express OR, split into multiple `[[
 
 ### Hot reload
 
-`gate.reload(new_toml_string)` accepts a TOML string. On parse error it raises `ValueError` and leaves the previous good set untouched. Reload is atomic; in-flight evaluations finish with their snapshot, subsequent evaluations pick up the new set.
+`gate.reload(new_toml_string)` accepts a TOML string in both languages. On parse error Python raises `ValueError`; Node throws an `Error`. In both cases the previous good set stays installed. Reload is atomic; in-flight evaluations finish with their snapshot, subsequent evaluations pick up the new set.
 
 The empty-TOML kill switch:
 
 ```python
-gate.reload("")  # deny everything
+gate.reload("")  # Python: deny everything
+```
+
+```typescript
+gate.reload("");  // Node: deny everything
 ```
 
 ## Kitchen-sink example
 
-A single file exercising every condition variant. The same content is also installed at [assets/policies.example.toml](../assets/policies.example.toml).
+A single file exercising every condition variant. The same content is also installed at [policies.example.toml](../assets/policies.example.toml).
 
 ```toml
 # Priority 1: nobody deletes production data outside business hours.
@@ -358,11 +393,20 @@ Any request that matches none of these five policies is refused by default-deny 
 
 ## Typo protection
 
-Misspelled condition names raise `ValueError` in every loader. This catches the silent class of bug where a misspelled condition (`{"idnetity_kind": "agent"}`) would otherwise be ignored, leaving a more permissive policy than intended.
+Misspelled condition names are rejected in every loader, in every language binding. This catches the silent class of bug where a misspelled condition (`{"idnetity_kind": "agent"}`) would otherwise be ignored, leaving a more permissive policy than intended.
+
+Python (raises `ValueError`):
 
 ```python
 Gate.from_dict({"policies": [{"name": "p", "effect": "permit", "conditions": [{"idnetity_kind": "agent"}]}]})
 # raises ValueError pointing at the bad key
+```
+
+Node (throws `Error`):
+
+```typescript
+Gate.fromObject({ policies: [{ name: "p", effect: "permit", conditions: [{ idnetity_kind: "agent" }] }] });
+// throws Error pointing at the bad key
 ```
 
 The same protection applies at the `[[policy]]` and top-level wrapper layers.

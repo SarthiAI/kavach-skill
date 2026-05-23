@@ -52,6 +52,8 @@ Pick a hashing strategy that is stable across legitimate sessions but changes wh
 
 `GeoLocation(country_code, region=None, city=None, latitude=None, longitude=None)` is the constructor. Only `country_code` is required; `region` and `city` are free-text annotations used in violation messages; `latitude` / `longitude` unlock tolerant mode (Haversine distance).
 
+**The geo check is gated by an IP transition.** The detector returns `Stable` (no violation) unless both `ip` and `origin_ip` are present AND they differ. If the IP stays the same, the geo coordinates are not consulted at all, so a same-IP request from a different country reads as no drift. Always populate `ip` / `origin_ip` together with `current_geo` / `origin_geo` for the geo check to engage.
+
 ```python
 from kavach import GeoLocation
 
@@ -88,7 +90,7 @@ Pick `geo_drift_max_km` based on the legitimate movement profile of your princip
 
 ## Session age
 
-The session-age drift detector reads `session_started_at` from the context. There is no SDK-level configuration; the threshold is set per-policy via the `session_age_max` condition (see [policy-language.md](policy-language.md#session_age_max)). The Python constructor accepts `session_started_at` as a unix-epoch integer (seconds since 1970-01-01 UTC), not a `datetime`.
+The session-age drift detector reads `session_started_at` from the context. There is no SDK-level configuration; the threshold is set per-policy via the `session_age_max` condition (see [policy-language.md](../references/policy-language.md#session_age_max)). The Python constructor accepts `session_started_at` as a unix-epoch integer (seconds since 1970-01-01 UTC), not a `datetime`.
 
 ```python
 import time

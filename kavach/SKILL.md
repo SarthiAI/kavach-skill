@@ -1,207 +1,136 @@
 ---
 name: kavach
-description: Add a default-deny execution gate around AI-agent actions in Python using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, or wants to wrap LangChain, LangGraph, or any agent tool-call code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
+description: Add a default-deny execution gate around AI-agent actions in Python or Node / TypeScript using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, signed audit chains, secure channels, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, EvaluateOptions, McpKavachMiddleware, guardTool, or wants to wrap LangChain, LangGraph, MCP tool calls, Express, Fastify, or any agent tool-call code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
 license: Apache-2.0
-compatibility: Python 3.10 or newer with kavach-sdk installed from PyPI. The Node SDK exists in the upstream repo but is not yet published to npm; treat Node integration as out of scope for this skill.
+compatibility: Python 3.10 or newer with `kavach-sdk` from PyPI. Node 18 or newer with `kavach-sdk` from npm. Both bindings sit on top of the same Rust core; behaviour, policy schema, verdict shape, and crypto primitives are identical across languages.
 metadata:
   homepage: https://github.com/SarthiAI/Kavach
   pypi: kavach-sdk
+  npm: kavach-sdk
   version: "0.1.0"
 ---
 
 # Kavach: default-deny execution gates for AI agents
 
-Kavach is a Rust-core, Python-bound library that puts a deny-by-default gate in front of every action your agent or service tries to execute. The gate runs three evaluators in order: **policy** (which also handles identity checks via the `identity_kind`, `identity_role`, and `identity_id` conditions), **drift** (optional, on by default), and **invariants** (optional, present when you pass `invariants=...` to the gate constructor). Each call produces one of three verdicts:
+> **Next step, pick your language and load that doc immediately:**
+> - **Python**: read [python/README.md](python/README.md), then [python/sdk.md](python/sdk.md).
+> - **Node / TypeScript**: read [node/README.md](node/README.md), then [node/sdk.md](node/sdk.md).
+>
+> The rest of this file is the conceptual overview. Code, install commands, and full API surface live in the language folder you just picked.
 
-- **Permit** with a signed `PermitToken` you can hand to downstream services as proof the action passed the gate.
-- **Refuse** with an evaluator name and a reason code, so the calling code knows *why* it was blocked.
-- **Invalidate** to nuke an entire session (used by drift detectors when something looks compromised).
+Kavach is a Rust-core library, bound to both Python and Node / TypeScript, that puts a deny-by-default gate in front of every action an agent or service tries to execute. Both bindings ship the same surface: a policy gate, four built-in drift detectors, post-quantum signed permit tokens, a tamper-evident audit chain, and a secure channel primitive. The behaviour is identical across languages because every cryptographic primitive and every evaluator runs in the same compiled Rust core.
 
-Every error path fails closed. Missing parameters, unparseable durations, store outages, and broadcaster failures all collapse to Refuse rather than vacuously permit.
+## What it does
+
+Every call passes through three evaluators in order:
+
+1. **Policy** decides whether the action matches a permit rule. Identity checks (`identity_kind`, `identity_role`, `identity_id`) run inside this phase. No matching permit means Refuse.
+2. **Drift** (optional, on by default) checks four signals about the principal's runtime context: device fingerprint, geo / IP, session age, and action-rate. Any violation can Refuse or Invalidate.
+3. **Invariants** (optional, present when configured) enforce hard numeric caps that beat any permissive policy. A policy permit that crosses an invariant becomes a Refuse.
+
+Each call produces exactly one of three verdicts:
+
+- **Permit**, with a signed `PermitToken` you can hand to downstream services as proof the action passed the gate.
+- **Refuse**, with an evaluator name and a reason code so the calling code knows *why* it was blocked.
+- **Invalidate**, which kills the entire session (used by drift detectors when something looks compromised).
+
+Every error path fails closed. Missing parameters, unparseable durations, store outages, broadcaster failures, signer errors, and unverifiable tokens all collapse to Refuse rather than vacuously permit.
 
 ## When this skill applies
 
-Activate this skill when the user is doing any of the following:
+Activate this skill when the user is doing any of the following in either Python or Node / TypeScript:
 
-- Adding `kavach-sdk` to a Python project.
-- Wrapping a LangChain tool, LangGraph node, or any agent tool-call handler behind a `Gate.evaluate(...)` or `Gate.check(...)` call.
-- Authoring a Kavach policy (in Python dict, JSON, or TOML form).
+- Adding `kavach-sdk` to a service.
+- Wrapping a LangChain tool, LangGraph node, MCP tool-call handler, Express / Fastify route, or any agent tool-call function behind a `Gate.evaluate(...)` / `Gate.check(...)` call.
+- Authoring a Kavach policy (Python dict, TypeScript object, JSON, or TOML form).
 - Wiring drift detectors (device fingerprint, geo location, session age, action count).
 - Issuing or verifying signed `PermitToken`s with `PqTokenSigner`.
 - Maintaining a tamper-evident `SignedAuditChain` of agent actions.
-- Asking how `Gate`, `ActionContext`, `Verdict`, or `Guarded` work.
+- Building a `SecureChannel` between two services.
+- Asking how `Gate`, `ActionContext` (Python) / `EvaluateOptions` (Node), `Verdict`, `Guarded`, or `guardTool` work.
 
 Skip when the user is asking about a different policy engine, building a different library, or already has Kavach wired and is debugging an unrelated issue.
 
-## What to install and import
+## Capabilities at a glance
 
-```bash
-pip install kavach-sdk
+| Capability                                                | Surface                                                  | Demonstrated in                                                                                              |
+| --------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Default-deny policy gate                                  | `Gate.evaluate` / `Gate.check`                           | scenario 01 (quickstart), 02 (document access), 08 (loan approval)                                            |
+| Five policy loaders (TOML, TOML file, dict / object, JSON, JSON file) | `Gate.from_dict`, `Gate.fromObject`, etc.       | scenario 23 (format equivalence in the older suite); every scenario uses one of the five                      |
+| Four drift detectors (device, geo, session age, action count) | drift evaluator, `EvaluateOptions` fields            | scenario 03 (geo drift), 04 (session hygiene), 11 (e-commerce fraud)                                          |
+| Tolerant-mode geo drift with distance threshold           | `geo_drift_max_km` / `geoDriftMaxKm`                     | scenario 03 (password reset across geo)                                                                       |
+| Hard-cap invariants beating any permissive policy         | `invariants=[...]` constructor arg                       | scenario 08 (loan approval regulator cap), 11 (e-commerce fraud cap)                                          |
+| Hot reload + empty-policy kill switch                     | `gate.reload(toml)`                                      | scenario 19 (hot reload resilience in the older suite)                                                        |
+| Observe-only rollout                                      | `observe_only=True` / `observeOnly: true`                | scenario 11 (e-commerce fraud rollout)                                                                        |
+| PQ-signed permit tokens (ML-DSA-65, hybrid Ed25519)       | `PqTokenSigner`, `verdict.permit_token`                  | scenario 05 (signed permit), 06 (ephemeral permits), 09 (key rotation)                                        |
+| Hybrid-mode downgrade defence                             | `is_hybrid` / `isHybrid` enforcement                     | scenario 07 (PQ hybrid downgrade)                                                                             |
+| Tamper-evident signed audit chain with JSONL export       | `SignedAuditChain`, `AuditEntry`                         | scenario 10 (break glass), 16 (healthcare PHI), 17 (PQ audit rotation), 20 (AI underwriter evidence)         |
+| Public-key directory + root-signed manifest               | `PublicKeyDirectory.from_signed_file` / `.fromSignedFile`, `DirectoryTokenVerifier` | scenario 09 (key rotation), 15 (agent marketplace), 17 (audit rotation)                  |
+| Cross-replica invalidation broadcast                      | `InMemoryInvalidationBroadcaster`, `spawn_invalidation_listener` | scenario 03 (geo drift broadcast), 14 (invalidation fanout)                                          |
+| Encrypted + signed + replay-protected byte channel        | `SecureChannel`                                          | scenario 13 (secure channel fleet), 15 (agent marketplace), 21 (customer deployed agent)                      |
+| AI-agent attestation (prompt-injection defence)           | signed intent + scope-hash binding                       | scenario 18 (AI agent attestation), 19 (cross-SaaS finance agent), 20 (AI underwriter), 21 (customer deployed) |
+| MCP tool-call gating middleware                           | `McpKavachMiddleware.guardTool` / `checkToolCall` (Node) | scenario 12 (HTTP + MCP middleware)                                                                           |
+
+Scenario numbers refer to the runnable suites at [business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python) (Python, 21 scripts) and [business-tests-node](https://github.com/SarthiAI/Kavach/tree/main/business-tests-node) (Node, 21 scripts mirroring Python one-to-one).
+
+## Policy schema overview
+
+One schema, five loaders, both languages:
+
+```toml
+[[policy]]
+name = "agent_small_refunds"
+effect = "permit"
+priority = 10
+conditions = [
+    { identity_kind = "agent" },
+    { action = "issue_refund" },
+    { param_max = { field = "amount", max = 5000.0 } },
+]
 ```
 
-The package is published as `kavach-sdk` on PyPI, but the import name is `kavach`:
+Same vocabulary in a Python dict or a TypeScript object. The condition variants (`identity_kind`, `identity_role`, `identity_id`, `action`, `resource`, `param_max`, `param_min`, `param_in`, `rate_limit`, `session_age_max`, `time_window`) are identical across all formats. Misspelled condition names are rejected at load time in every loader, in every language.
 
-```python
-from kavach import Gate, ActionContext
-```
+For the full grammar (conditions, durations, time-window syntax, priority order, default-deny semantics, hot-reload behaviour), read [references/policy-language.md](references/policy-language.md).
 
-A single `abi3` wheel per platform covers CPython 3.10, 3.11, 3.12, and every future Python.
+## Pick your language
 
-## The shortest working example
+| Language          | Entry point                          | When                                                   |
+| ----------------- | ------------------------------------ | ------------------------------------------------------ |
+| Python 3.10+      | [python/README.md](python/README.md) | Backend service in Python, FastAPI / Django / Flask, LangChain / LangGraph orchestration, Jupyter / data pipelines. |
+| Node / TypeScript | [node/README.md](node/README.md)     | Backend service in Node, Express / Fastify, MCP server, agent runtime, Edge functions, anything in the npm ecosystem. |
 
-```python
-from kavach import ActionContext, Gate
+Each language folder ships the same five deep-reference docs: `README.md` (install + quickstart), `sdk.md` (full surface), `drift-detectors.md`, `audit-and-pq.md`, `secure-channel.md`, plus a runnable scaffold (`scaffold.py` / `scaffold.ts`).
 
-policy = {
-    "policies": [
-        {
-            "name": "agent_small_refunds",
-            "effect": "permit",
-            "conditions": [
-                {"identity_kind": "agent"},
-                {"action": "issue_refund"},
-                {"param_max": {"field": "amount", "max": 1000.0}},
-            ],
-        },
-    ],
-}
+Shared across both languages: [references/policy-language.md](references/policy-language.md) (policy grammar) and [assets/policies.example.toml](assets/policies.example.toml) (kitchen-sink TOML example).
 
-gate = Gate.from_dict(
-    policy,
-    invariants=[("hard_cap", "amount", 50_000.0)],
-)
+## Hard rules (apply to every language)
 
-ctx = ActionContext(
-    principal_id="agent-bot",
-    principal_kind="agent",
-    action_name="issue_refund",
-    params={"amount": 500.0},
-)
+- **Never fail open.** Do not change `Gate` to skip evaluators, return Permit on errors, or downgrade Refuse to Permit. The library's contract is fail-closed; integrators rely on it for compliance and incident response.
+- **Never skip invariants when refactoring policies.** Invariants are the regulator-grade hard floor that beats any permissive policy. Removing them in favour of a `param_max` policy condition silently weakens the system.
+- **No implicit allow.** An empty policy set is valid and means deny-everything (useful as a kill switch). To permit anything, write a policy with `effect: "permit"` and the conditions that match.
+- **Do not install third-party crypto libraries to handle Kavach signatures.** The SDK ships every algorithm Kavach uses (ML-DSA-65, ML-KEM-768, Ed25519, X25519, ChaCha20-Poly1305) compiled in via PyO3 (Python) and napi-rs (Node). External PQ libraries are not guaranteed interoperable.
+- **Sign-failure is fail-closed.** A `PqTokenSigner` that errors during evaluation turns the verdict into Refuse, never a permit-without-signature.
+- **Always pass UUIDs for `session_id` / `sessionId`.** A non-UUID value is silently replaced with a fresh random UUID, which means rate-limit and drift state will not match between calls that share a non-UUID string.
 
-verdict = gate.evaluate(ctx)
-if verdict.is_permit:
-    print("permit", verdict.token_id)
-else:
-    print(f"blocked: [{verdict.code}] {verdict.evaluator}: {verdict.reason}")
-```
+## Verifying a working integration
 
-A few load-bearing details to communicate to the user:
+A successful integration produces a Permit verdict carrying a fresh `tokenId` for in-policy actions, and a Refuse / Invalidate verdict (with the right `evaluator` and `code`) for out-of-policy actions. Both languages ship 21 runnable scenarios that pin the full contract end-to-end:
 
-- **No matching permit means Refuse.** There is no implicit allow. An empty policy set is valid (it denies everything, useful as a kill switch via hot reload).
-- **Invariants beat policies.** The third tuple element in `invariants=[...]` is a hard cap on a numeric param. Even a permit verdict from the policy phase gets overturned by a violating invariant.
-- **Typo'd condition names raise.** `{"idnetity_kind": "agent"}` raises `ValueError` instead of being silently ignored. This is true for `from_dict`, `from_toml`, and the JSON loaders alike.
+- Python: [github.com/SarthiAI/Kavach/tree/main/business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python)
+- Node: [github.com/SarthiAI/Kavach/tree/main/business-tests-node](https://github.com/SarthiAI/Kavach/tree/main/business-tests-node)
 
-## Loading policies, the four ways
+Each suite runs in roughly twelve to thirteen seconds and exits 0 on full pass.
 
-```python
-gate = Gate.from_dict(policy_dict)          # native Python dict, recommended for programmatic policy
-gate = Gate.from_json_string(json_string)   # JSON over the wire (REST API, ConfigMap)
-gate = Gate.from_json_file("kavach.json")   # JSON file on disk
-gate = Gate.from_toml(toml_string)          # operator-edited TOML
-gate = Gate.from_file("kavach.toml")        # TOML file on disk
-```
+## Next step (again, do not skip)
 
-All five produce an identical `Gate` and identical evaluation. Pick by where the policy lives, not by what it does. Hand-edited config in git: TOML. Programmatic construction from Python: dict. JSON over the wire: JSON. The condition vocabulary, defaults, and fail-closed semantics are the same.
+> **Load the language doc for the user's stack now.** This SKILL.md is overview only; it does not contain install commands, working code, or the full API surface.
+> - **Python**: [python/README.md](python/README.md) and [python/sdk.md](python/sdk.md).
+> - **Node / TypeScript**: [node/README.md](node/README.md) and [node/sdk.md](node/sdk.md).
+> - Shared by both: [references/policy-language.md](references/policy-language.md), [assets/policies.example.toml](assets/policies.example.toml).
 
-For the full grammar of conditions, priorities, durations, and time-window syntax, read [references/policy-language.md](references/policy-language.md).
+## License + repo
 
-## ActionContext fields you actually need
+Kavach the library is released under the [Elastic License 2.0](https://github.com/SarthiAI/Kavach/blob/main/LICENSE) (source-available; embed and modify, but do not repackage as a competing hosted service). This skill content (Markdown, example policies, scaffold scripts) is Apache-2.0 and freely embeddable in any agent runtime.
 
-| Field                | Required for                                   | Notes                                                         |
-| -------------------- | ---------------------------------------------- | ------------------------------------------------------------- |
-| `principal_id`       | always                                         | Stable string. Used as the rate-limit bucket prefix.          |
-| `principal_kind`     | always                                         | One of `"user"`, `"agent"`, `"service"`, `"scheduler"`, `"external"`. |
-| `action_name`        | always                                         | Used by the `action` condition. Wildcards via trailing `*`.   |
-| `params`             | numeric guards (`param_max`, `param_min`), invariants | `dict[str, float]`. Constructor accepts only numeric values; for string params (`param_in`, e.g. `currency`), call `ctx.with_param("currency", "INR")` after construction. |
-| `roles`              | `identity_role` conditions                     | List of strings. Order does not matter.                       |
-| `resource`           | `resource` conditions                          | Optional. Missing resource fails the condition (closed).      |
-| `session_id`         | `session_age_max`, behavior drift, audit       | UUID string. A non-UUID value is silently replaced with a fresh random UUID, always pass `str(uuid.uuid4())`. |
-| `session_started_at` | `session_age_max`, behavior drift              | Unix epoch seconds (`int`). Required when using session-age drift. |
-| `action_count`       | behavior drift                                 | Unsigned integer. Caller increments per action.               |
-| `ip`, `origin_ip`    | geo drift                                      | IP strings; `origin_ip` overrides the `ip`-derived session origin. |
-| `current_geo`, `origin_geo` | geo drift                               | `GeoLocation`. See [references/drift-detectors.md](references/drift-detectors.md). |
-| `device`, `origin_device` | device drift                              | `DeviceFingerprint(hash, description=None)`. See drift-detectors doc. |
-
-Anything you do not pass is simply not evaluated. Drift conditions that need a missing field fail closed, never silently bypass. There is no `evaluated_at` constructor field; the gate uses the system clock for `time_window` evaluation.
-
-## The `@guarded` decorator
-
-For tool-call wrappers, prefer the decorator over manually building the context:
-
-```python
-from kavach import guarded
-
-@guarded(gate, action="issue_refund", param_fields={"amount": "amount"})
-async def issue_refund(order_id: str, amount: float):
-    return {"status": "refunded", "order_id": order_id, "amount": amount}
-
-result = await issue_refund(
-    "ORD-123", 500.0,
-    _principal_id="bot", _principal_kind="agent",
-)
-```
-
-Both async and sync wrapped functions are supported. Only numeric parameters are forwarded to the gate (the policy and invariant evaluators care about numeric thresholds, nothing else).
-
-## Hot reload and the empty-policy kill switch
-
-```python
-gate.reload(new_policy_toml)
-```
-
-`reload` accepts a TOML string. It raises `ValueError` on parse error and leaves the previous good set untouched. Reloading with `""` (empty TOML) installs an empty PolicySet, which means *deny everything*. That is the recommended kill switch for "stop all agent actions, now" and the safest possible default state.
-
-## Observe-only rollout
-
-To stage Kavach without blocking traffic, construct the gate with `observe_only=True`:
-
-```python
-gate = Gate.from_dict(policy, observe_only=True)
-```
-
-In observe mode, every `gate.evaluate(ctx)` returns a Permit and `gate.check(ctx)` never raises. The full evaluator chain (policy, drift, invariants) still runs; underlying refuse / invalidate decisions are emitted by the Rust core as `tracing` events at `INFO` level with the message `"observe-only: would have blocked this action"`. There is no `verdict.would_have_been` attribute on the Python `Verdict`.
-
-To get programmatic visibility, wire a `SignedAuditChain` (or your own logger) around `gate.evaluate` and record every call: when you flip `observe_only=False` later, the same chain becomes the production audit trail. See [references/python-sdk.md](references/python-sdk.md#observe-mode) for the full rollout pattern.
-
-## Deeper reference
-
-- [references/python-sdk.md](references/python-sdk.md): full Python surface (Gate kwargs, `Gate.check`, `@guarded` decorator, `Refused`/`Invalidated` exceptions, hot reload, observe-only mode).
-- [references/policy-language.md](references/policy-language.md): condition vocabulary, duration syntax, time-window grammar, kitchen-sink example.
-- [references/drift-detectors.md](references/drift-detectors.md): device, geo, session-age, action-count detectors and their `ActionContext` fields.
-- [references/audit-and-pq.md](references/audit-and-pq.md): `KavachKeyPair`, `PqTokenSigner` (PQ-only and hybrid), `SignedAuditChain`, `PublicKeyDirectory`, JSONL export and verification.
-- [references/secure-channel.md](references/secure-channel.md): `SecureChannel`, encrypted + signed + replay-protected byte channels between two peers.
-- [scripts/scaffold_python.py](scripts/scaffold_python.py): runnable scaffold that writes a starter `kavach_setup.py` plus an example policy file.
-- [assets/policies.example.toml](assets/policies.example.toml): the kitchen-sink TOML policy exercising every condition variant.
-
-## What to avoid
-
-- Do not suggest the Node SDK, MCP middleware, HTTP middleware, or any multi-replica Redis deployment. None of these are publicly released. The published surface is `kavach-sdk` on PyPI, and that is the only surface this skill covers. If a user asks for those, point them at the upstream repo and the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md) and stop there.
-- Do not change `Gate` to fail open under any circumstance, even temporarily for debugging. The library's contract is fail-closed; integrators rely on it.
-- Do not skip invariants when refactoring policies. Invariants are the regulator-grade hard floor that beats any permissive policy. Removing them in favor of a `param_max` policy condition silently weakens the system.
-
-## Verifying it works
-
-A successful integration looks like this:
-
-```python
-verdict = gate.evaluate(ctx)
-assert verdict.is_permit
-assert verdict.permit_token is not None
-assert verdict.permit_token.action_name == ctx.action_name
-```
-
-A correctly-failing integration looks like this:
-
-```python
-ctx_too_big = ActionContext(
-    principal_id="agent-bot", principal_kind="agent",
-    action_name="issue_refund",
-    params={"amount": 99_999.0},
-)
-verdict = gate.evaluate(ctx_too_big)
-assert verdict.is_refuse
-assert verdict.evaluator == "invariants"
-assert verdict.permit_token is None
-```
-
-Both are pinned by the runnable scenarios at [github.com/SarthiAI/Kavach/tree/main/business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python). Forty-one scripts cover the full Python surface and run end-to-end in roughly five seconds.
+For surfaces not yet covered in this skill (HTTP middleware deep dive, multi-replica Redis deployments, additional language bindings), see the [Kavach roadmap](https://github.com/SarthiAI/Kavach/blob/main/docs/roadmap.md).

@@ -1,6 +1,6 @@
 # Python SDK reference
 
-Detailed reference for the `kavach` Python package (published as `kavach-sdk` on PyPI). For the policy schema (conditions, durations, time windows), see [policy-language.md](policy-language.md). For drift, audit, and crypto, see the sibling reference docs.
+Detailed reference for the `kavach` Python package (published as `kavach-sdk` on PyPI). For the policy schema (conditions, durations, time windows), see [policy-language.md](../references/policy-language.md). For drift, audit, and crypto, see the sibling reference docs in this folder.
 
 ## Install
 
@@ -109,6 +109,8 @@ ctx.with_param("region", "ap-south-1")
 ```
 
 `with_param` accepts numeric, string, and bool values, and overwrites any prior value at the same key. Run all `with_param` calls before `gate.evaluate(ctx)`.
+
+`ActionContext` is write-only from Python: it accepts the constructor kwargs and `with_param` calls, but exposes no field getters back (`ctx.principal_id`, `ctx.action_name`, `ctx.session_id` all raise `AttributeError`). If you need any of those values later (for audit logging, structured tracing, downstream propagation), keep the input dict alongside the context object; do not try to read them off the context.
 
 ## Verdict shape
 
@@ -301,8 +303,8 @@ Invariants run in observe mode too (the chain is full); they are simply suppress
 
 ## Where to look for more
 
-- [policy-language.md](policy-language.md) for the condition grammar.
+- [policy-language.md](../references/policy-language.md) for the condition grammar.
 - [drift-detectors.md](drift-detectors.md) for `DeviceFingerprint`, `GeoLocation`, session-age and behavior drift.
 - [audit-and-pq.md](audit-and-pq.md) for signed permits, the audit chain, and the public-key directory.
 - [secure-channel.md](secure-channel.md) for `SecureChannel` (encrypted, signed, replay-protected byte channels between two peers).
-- [github.com/SarthiAI/Kavach/tree/main/business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python) for forty-one runnable scenarios that exercise the full Python surface end-to-end.
+- [github.com/SarthiAI/Kavach/tree/main/business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python) for twenty-one runnable scenarios that exercise the full Python surface end-to-end.
