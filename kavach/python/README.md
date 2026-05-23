@@ -112,6 +112,28 @@ result = await issue_refund(
 
 Both async and sync wrapped functions are supported. Only numeric parameters are forwarded to the gate (the policy and invariant evaluators care about numeric thresholds, nothing else).
 
+## `McpKavachMiddleware` for MCP servers
+
+For Python MCP servers (single `call_tool` loop dispatching by tool name), prefer the middleware over the decorator:
+
+```python
+from kavach import Gate, McpKavachMiddleware, InMemorySessionStore
+
+gate = Gate.from_file("kavach.toml")
+kavach = McpKavachMiddleware(gate, session_store=InMemorySessionStore())
+
+kavach.check_tool_call(
+    tool_name="issue_refund",
+    params={"amount": 500},
+    caller_id="agent-bot",
+    caller_kind="agent",
+    session_id=session_uuid,
+)
+# Reaching here means the gate permitted.
+```
+
+Methods: `check_tool_call(...)` raises `kavach.Refused` / `kavach.Invalidated` on a block; `evaluate_tool_call(...)` returns the `Verdict` instead of raising; `invalidate_session(sid)` revokes a session (fans out via the session store to peer replicas); `get_session(sid)` returns the local view. For the full method surface and argument list, see [sdk.md](sdk.md#mckavachmiddleware-check_tool_call-evaluate_tool_call-invalidate_session).
+
 ## Hot reload and the empty-policy kill switch
 
 ```python
@@ -134,7 +156,7 @@ To get programmatic visibility, wire a `SignedAuditChain` (or your own logger) a
 
 ## Deeper reference
 
-- [sdk.md](sdk.md): full Python surface (Gate kwargs, `Gate.check`, `@guarded` decorator, `Refused` / `Invalidated` exceptions, hot reload, observe-only mode).
+- [sdk.md](sdk.md): full Python surface (Gate kwargs, `Gate.check`, `@guarded` decorator, `McpKavachMiddleware`, `Refused` / `Invalidated` exceptions, hot reload, observe-only mode).
 - [drift-detectors.md](drift-detectors.md): device, geo, session-age, action-count detectors and their `ActionContext` fields.
 - [audit-and-pq.md](audit-and-pq.md): `KavachKeyPair`, `PqTokenSigner` (PQ-only and hybrid), `SignedAuditChain`, `PublicKeyDirectory`, JSONL export and verification.
 - [secure-channel.md](secure-channel.md): `SecureChannel`, encrypted + signed + replay-protected byte channels between two peers.

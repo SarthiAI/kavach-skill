@@ -1,6 +1,6 @@
 ---
 name: kavach
-description: Add a default-deny execution gate around AI-agent actions in Python or Node / TypeScript using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, signed audit chains, secure channels, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, EvaluateOptions, McpKavachMiddleware, guardTool, or wants to wrap LangChain, LangGraph, MCP tool calls, Express, Fastify, or any agent tool-call code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
+description: Add a default-deny execution gate around AI-agent actions in Python or Node / TypeScript using the kavach-sdk library. Use when the user is integrating Kavach, wants to add policy enforcement, drift detection, signed permit tokens, signed audit chains, secure channels, or default-deny request validation, mentions Gate, Guarded, PermitToken, ActionContext, EvaluateOptions, McpKavachMiddleware, guardTool, check_tool_call, evaluate_tool_call, or wants to wrap LangChain, LangGraph, MCP tool calls, Express, Fastify, or any agent tool-call code behind a deny-by-default check. Skip if Kavach is already wired up and the user is debugging unrelated code, or if the user is asking about a different policy engine (OPA, Cerbos, Casbin).
 license: Apache-2.0
 compatibility: Python 3.10 or newer with `kavach-sdk` from PyPI. Node 18 or newer with `kavach-sdk` from npm. Both bindings sit on top of the same Rust core; behaviour, policy schema, verdict shape, and crypto primitives are identical across languages.
 metadata:
@@ -47,7 +47,7 @@ Activate this skill when the user is doing any of the following in either Python
 - Issuing or verifying signed `PermitToken`s with `PqTokenSigner`.
 - Maintaining a tamper-evident `SignedAuditChain` of agent actions.
 - Building a `SecureChannel` between two services.
-- Asking how `Gate`, `ActionContext` (Python) / `EvaluateOptions` (Node), `Verdict`, `Guarded`, or `guardTool` work.
+- Asking how `Gate`, `ActionContext` (Python) / `EvaluateOptions` (Node), `Verdict`, `Guarded`, `guardTool`, or `check_tool_call` work.
 
 Skip when the user is asking about a different policy engine, building a different library, or already has Kavach wired and is debugging an unrelated issue.
 
@@ -69,7 +69,7 @@ Skip when the user is asking about a different policy engine, building a differe
 | Cross-replica invalidation broadcast                      | `InMemoryInvalidationBroadcaster`, `spawn_invalidation_listener` | scenario 03 (geo drift broadcast), 14 (invalidation fanout)                                          |
 | Encrypted + signed + replay-protected byte channel        | `SecureChannel`                                          | scenario 13 (secure channel fleet), 15 (agent marketplace), 21 (customer deployed agent)                      |
 | AI-agent attestation (prompt-injection defence)           | signed intent + scope-hash binding                       | scenario 18 (AI agent attestation), 19 (cross-SaaS finance agent), 20 (AI underwriter), 21 (customer deployed) |
-| MCP tool-call gating middleware                           | `McpKavachMiddleware.guardTool` / `checkToolCall` (Node) | scenario 12 (HTTP + MCP middleware)                                                                           |
+| MCP tool-call gating middleware                           | Python: `McpKavachMiddleware.check_tool_call` / `evaluate_tool_call` / `invalidate_session`. Node: `McpKavachMiddleware.guardTool` / `checkToolCall` / `evaluateToolCall` / `invalidateSession` | scenario 12 (HTTP + MCP middleware)                                                                           |
 
 Scenario numbers refer to the runnable suites at [business-tests-python](https://github.com/SarthiAI/Kavach/tree/main/business-tests-python) (Python, 21 scripts) and [business-tests-node](https://github.com/SarthiAI/Kavach/tree/main/business-tests-node) (Node, 21 scripts mirroring Python one-to-one).
 

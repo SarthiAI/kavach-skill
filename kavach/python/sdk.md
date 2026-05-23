@@ -239,6 +239,45 @@ def search_orders(query: str, limit: int = 10):
     ...
 ```
 
+## McpKavachMiddleware (`check_tool_call`, `evaluate_tool_call`, `invalidate_session`)
+
+For MCP tool-call handlers, prefer the middleware over manually building the `ActionContext`. The Python middleware ships three callable methods plus one accessor:
+
+```python
+from kavach import Gate, McpKavachMiddleware, InMemorySessionStore
+
+gate = Gate.from_file("kavach.toml")
+kavach = McpKavachMiddleware(gate, session_store=InMemorySessionStore())
+
+# Inside your MCP server's tool-call handler:
+kavach.check_tool_call(
+    tool_name="issue_refund",
+    params={"amount": 500, "order_id": "ORD-123"},
+    caller_id="agent-bot",
+    caller_kind="agent",
+    session_id=session_uuid,
+)
+# If we reach here the gate permitted; run the tool.
+result = process_refund(...)
+```
+
+The constructor is `McpKavachMiddleware(gate, *, session_store=None)`. If `session_store` is omitted, an in-process `InMemorySessionStore` is created internally so single-node and multi-node deployments share one code path. For multi-replica deployments pass a `RedisSessionStore`; subsequent `invalidate_session(sid)` calls then fan out to peer replicas via Redis and any peer's next `check_tool_call` on that session raises `kavach.Invalidated` before reaching the gate.
+
+The four methods:
+
+| Method                  | Returns                  | Raises                                                    | Purpose                                                                                                              |
+| ----------------------- | ------------------------ | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `check_tool_call(...)`  | `None` on Permit         | `kavach.Refused` on Refuse, `kavach.Invalidated` on Invalidate | Gate the call and raise if blocked. The right surface for code that does not need to introspect the Permit verdict. |
+| `evaluate_tool_call(...)` | `Verdict`              | (never raises)                                            | Non-throwing variant; you branch on `verdict.is_permit` / `is_refuse` / `is_invalidate` yourself.                    |
+| `invalidate_session(sid)` | `None`                 | (never raises)                                            | Mark a session invalid both locally and via the shared session store.                                                |
+| `get_session(sid)`      | `McpSession` or `None`   | (never raises)                                            | Inspect the local session view; honours remote invalidation written by peer replicas.                                |
+
+Both `check_tool_call` and `evaluate_tool_call` accept the same keyword-only arguments: `tool_name`, `params` (dict, numeric values become invariant inputs), `caller_id`, `caller_kind` (defaults to `"agent"`, accepts `"agent"`, `"user"`, `"service"`, `"scheduler"`, `"external"`), `roles`, `session_id`, `ip`, `current_geo`, `origin_geo`. They build an `ActionContext` internally; you don't need to assemble one yourself.
+
+`Refused` and `Invalidated` carry the same `reason` / `evaluator` / `code` attributes as for `Gate.check` (see [Errors raised by the SDK](#errors-raised-by-the-sdk)).
+
+When to prefer `McpKavachMiddleware` over the `@guarded` decorator: use the middleware when your handler is dispatched from an MCP server's `call_tool` loop (a single coroutine that handles every tool by name) so one middleware instance gates all tools. Use `@guarded` when each tool is its own function and you want the gating to live next to the function declaration.
+
 ## Hot reload
 
 ```python
