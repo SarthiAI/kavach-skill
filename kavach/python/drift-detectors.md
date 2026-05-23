@@ -2,6 +2,8 @@
 
 Drift detectors run as the third evaluator in the gate chain (after identity and policy, before invariants). They detect that something about the principal's runtime context has changed in a way that should block the action or invalidate the session.
 
+A drift Violation always produces a `Verdict::Invalidate` (`verdict.is_invalidate == True`, `evaluator == "drift"`, `code` is `None`), not a Refuse. Drift signals are designed to mean "the session itself is no longer trustworthy", so the caller is expected to drop the session and force a fresh login or re-attestation. A Refuse from the drift evaluator only happens when multiple concurrent Warnings (sub-violation signals, e.g. tolerant-mode geo hops near the threshold) stack up past the gate's warning threshold; that path is rare in practice and never produces a `code` of `"DRIFT_DETECTED"` per detector.
+
 Four detectors ship out of the box, all reachable from Python through `ActionContext` fields. None of them need explicit setup; constructing a `Gate` wires them in by default. The optional `geo_drift_max_km` keyword on `Gate.from_dict` (and the other loaders) switches the geo detector into tolerant mode.
 
 ## The four detectors

@@ -215,6 +215,26 @@ const verifiedCount = SignedAuditChain.verifyJsonl(blob, kp.publicKeys());
 // verifiedCount is the number of verified entries (number).
 ```
 
+Each line is a JSON-encoded `SignedAuditEntry` with this shape (one line shown re-indented for readability; in the file every entry is one line):
+
+```jsonc
+{
+  "index": 4,
+  "previous_hash": "9f2c…ab83",
+  "signed_payload": {
+    "data": [123, 34, 112, …],        // bytes of the JSON-serialized audit payload (principalId, actionName, verdict, verdictDetail, timestamps, optional fields)
+    "ml_dsa_signature": [/* bytes */],
+    "ed25519_signature": [/* bytes */, /* present only in hybrid mode */],
+    "key_id": "kavach-prod-2026",
+    "signed_at": "2026-04-21T10:14:33.512Z",
+    "nonce": "f2b7…91"
+  },
+  "entry_hash": "5e1a…cc44"
+}
+```
+
+For a tamper-detection test, flipping any byte inside `signed_payload.data` invalidates both the entry hash chain (because `entry_hash` covers the payload) AND the ML-DSA signature in one go, so `verifyJsonl` throws at the first tampered entry. Flipping a byte in `previous_hash` or `entry_hash` directly is equally effective.
+
 `verifyJsonl` infers the chain mode (PQ-only or hybrid) from the blob by default. To assert a specific mode:
 
 ```typescript

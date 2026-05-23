@@ -296,6 +296,57 @@ A typical observe-then-enforce rollout:
 
 Invariants run in observe mode too (the chain is full); they are simply suppressed in the surfaced verdict like every other refuse path.
 
+## Cross-replica invalidation broadcast
+
+`InMemoryInvalidationBroadcaster` is the in-process publish / subscribe channel for `Verdict::Invalidate` events. Construct the gate with `broadcaster: ...` in `GateOptions` and every Invalidate verdict the gate produces is also published on that broadcaster so any listener can fan out the kill (e.g. wipe a session cache, force a re-login on every other replica).
+
+```typescript
+import {
+  Gate,
+  InMemoryInvalidationBroadcaster,
+  spawnInvalidationListener,
+} from "kavach-sdk";
+
+const broadcaster = new InMemoryInvalidationBroadcaster();
+const gate = Gate.fromObject(policy, { broadcaster });
+
+const handle = spawnInvalidationListener(broadcaster, (scope) => {
+  // scope.targetKind === "session" | "principal" | "role"
+  // scope.targetId   === UUID string (session) | principal id | role name
+  // scope.reason, scope.evaluator
+  dropSessionLocally(scope.targetId);
+});
+
+// ... gate produces Invalidate verdicts in normal flow; the callback fires ...
+
+handle.abort();   // stop the listener; subsequent invalidations on this broadcaster are no-ops here.
+```
+
+The callback runs on the Node event loop via a `ThreadsafeFunction`; exceptions thrown inside the callback are caught and logged to stderr, they never crash the listener task.
+
+### Publishing a synthetic invalidation (for tests)
+
+The `InvalidationScopeView` interface has no constructor on the JS side; it is only ever produced by the Rust core. To exercise a listener pipeline without routing a real Invalidate verdict through the gate, call `broadcaster.publish(...)` directly. The method takes positional arguments and is synchronous (returns `void`, not a Promise):
+
+```typescript
+import { randomUUID } from "node:crypto";
+
+broadcaster.publish(
+  "session",                       // targetKind: "session" | "principal" | "role"
+  randomUUID(),                    // targetId (see note below)
+  "test invalidation",             // reason (shown in the InvalidationScopeView handed to listeners)
+  "manual",                        // evaluator (optional; defaults to "manual")
+);
+```
+
+`targetId` parsing is strict per `targetKind`:
+
+- `"session"`: must be a valid UUID string. A non-UUID rejects.
+- `"principal"`: any string (the principal id).
+- `"role"`: any string (the role name).
+
+Use this exclusively for tests, fixtures, and admin tooling; production invalidations should always come through `Gate.evaluate(...)` so the evaluator-level reasoning is preserved.
+
 ## Errors thrown by the SDK
 
 | Error                | Properties                                       | When                                                                                       |

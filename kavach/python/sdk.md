@@ -110,6 +110,8 @@ ctx.with_param("region", "ap-south-1")
 
 `with_param` accepts numeric, string, and bool values, and overwrites any prior value at the same key. Run all `with_param` calls before `gate.evaluate(ctx)`.
 
+`with_param` returns `None`, not `self`. It cannot be chained off the constructor; call it as a separate statement (the example above is the canonical pattern). Writing `ActionContext(...).with_param("currency", "INR")` raises `AttributeError` on the next operation because the chained value is `None`, not the context.
+
 `ActionContext` is write-only from Python: it accepts the constructor kwargs and `with_param` calls, but exposes no field getters back (`ctx.principal_id`, `ctx.action_name`, `ctx.session_id` all raise `AttributeError`). If you need any of those values later (for audit logging, structured tracing, downstream propagation), keep the input dict alongside the context object; do not try to read them off the context.
 
 ## Verdict shape
@@ -319,6 +321,54 @@ A typical observe-then-enforce rollout:
 3. Flip to `observe_only=False`. The chain stays in place as the production audit trail; refuse / invalidate verdicts now reach the caller.
 
 Invariants run in observe mode too (the chain is full); they are simply suppressed in the surfaced verdict like every other refuse path.
+
+## Cross-replica invalidation broadcast
+
+`InMemoryInvalidationBroadcaster` is the in-process publish / subscribe channel for `Verdict::Invalidate` events. Construct the gate with `broadcaster=...` and every Invalidate verdict the gate produces is also published on that broadcaster so any listener can fan out the kill (e.g. wipe a session cache, force a re-login on every other replica). For multi-replica deployments where the broadcast needs to cross process boundaries, use `RedisInvalidationBroadcaster` instead; the surface is the same.
+
+```python
+from kavach import (
+    Gate, InMemoryInvalidationBroadcaster, spawn_invalidation_listener,
+)
+
+broadcaster = InMemoryInvalidationBroadcaster()
+gate = Gate.from_dict(policy, broadcaster=broadcaster)
+
+def on_invalidation(scope):
+    # scope.target_kind == "session" | "principal" | "role"
+    # scope.target_id   == UUID str (session) | principal id | role name
+    # scope.reason, scope.evaluator
+    drop_session_locally(scope.target_id)
+
+handle = spawn_invalidation_listener(broadcaster, on_invalidation)
+
+# ... gate produces Invalidate verdicts in normal flow; on_invalidation fires ...
+
+handle.abort()   # stop the listener task; subsequent invalidations on this broadcaster are no-ops here.
+```
+
+### Publishing a synthetic invalidation (for tests)
+
+The `InvalidationScope` class has no Python constructor; it is only ever produced by the Rust core. To exercise a listener pipeline without routing a real Invalidate verdict through the gate, call `broadcaster.publish(...)` directly:
+
+```python
+import uuid
+
+broadcaster.publish(
+    "session",                      # target_kind: "session" | "principal" | "role"
+    str(uuid.uuid4()),              # target_id (see UUID note below)
+    "test invalidation",            # reason (shown in the InvalidationScope handed to listeners)
+    evaluator="manual",             # optional, defaults to "manual"
+)
+```
+
+`target_id` parsing is strict per `target_kind`:
+
+- `"session"`: must be a valid UUID string. A non-UUID raises `ValueError`.
+- `"principal"`: any string (the principal id).
+- `"role"`: any string (the role name).
+
+`publish` is fire-and-forget; listeners receive the resulting `InvalidationScope` on the next tick of the event loop their `spawn_invalidation_listener` task runs on. Use this exclusively for tests, fixtures, and admin tooling; production invalidations should always come through `Gate.evaluate` so the evaluator-level reasoning is preserved.
 
 ## Errors raised by the SDK
 
